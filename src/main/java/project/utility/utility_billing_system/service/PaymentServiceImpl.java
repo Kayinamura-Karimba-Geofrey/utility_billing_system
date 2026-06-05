@@ -24,6 +24,9 @@ public class PaymentServiceImpl implements PaymentService {
     @Autowired
     private BillRepository billRepository;
 
+    @Autowired
+    private EmailService emailService;
+
     @Override
     @Transactional
     public Payment processPayment(PaymentRequest request) {
@@ -61,6 +64,11 @@ public class PaymentServiceImpl implements PaymentService {
         if (newOutstanding <= 0.001) { // Floating point safety margin
             bill.setOutstandingBalance(0.0);
             bill.setStatus(BillStatus.PAID);
+
+            // Send payment confirmation email to customer
+            String customerEmail = bill.getMeter().getCustomer().getEmail();
+            String customerName = bill.getMeter().getCustomer().getFullNames();
+            emailService.sendPaymentConfirmationEmail(customerEmail, customerName, bill.getBillingPeriod(), bill.getTotalAmount());
         } else {
             bill.setStatus(BillStatus.PARTIALLY_PAID);
         }
