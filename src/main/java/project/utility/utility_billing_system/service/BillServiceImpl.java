@@ -24,6 +24,9 @@ public class BillServiceImpl implements BillService {
     @Autowired
     private TariffService tariffService;
 
+    @Autowired
+    private EmailService emailService;
+
     @Override
     @Transactional
     public Bill generateBillFromReading(Long readingId) {
@@ -73,7 +76,14 @@ public class BillServiceImpl implements BillService {
                 .status(BillStatus.PENDING_APPROVAL)
                 .build();
 
-        return billRepository.save(bill);
+        Bill savedBill = billRepository.save(bill);
+
+        // Send email notification to customer
+        String customerEmail = meter.getCustomer().getEmail();
+        String customerName = meter.getCustomer().getFullNames();
+        emailService.sendBillGeneratedEmail(customerEmail, customerName, period, totalAmount);
+
+        return savedBill;
     }
 
     @Override
