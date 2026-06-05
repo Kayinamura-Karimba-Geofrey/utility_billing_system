@@ -1,104 +1,61 @@
 package project.utility.utility_billing_system.trigger;
 
-import org.h2.api.Trigger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
 
-import java.sql.*;
-import java.time.LocalDateTime;
+@Component
+public class DatabaseTrigger implements CommandLineRunner {
 
-public class DatabaseTrigger implements Trigger {
-
-    @Override
-    public void init(Connection conn, String schemaName, String triggerName,
-                     String tableName, boolean before, int type) throws SQLException {
-        // No-op
-    }
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @Override
-    public void fire(Connection conn, Object[] oldRow, Object[] newRow) throws SQLException {
-        if (newRow == null) return;
+    public void run(String... args) throws Exception {
+        String createFunctionSql = 
+            "CREATE OR REPLACE FUNCTION bill_trigger_function() " +
+            "RETURNS TRIGGER AS $$ " +
+            "DECLARE " +
+            "    v_customer_name VARCHAR; " +
+            "    v_email VARCHAR; " +
+            "    v_phone_number VARCHAR; " +
+            "    v_notif_count INT; " +
+            "    v_message TEXT; " +
+            "BEGIN " +
+            "    SELECT c.full_names, c.email, c.phone_number " +
+            "    INTO v_customer_name, v_email, v_phone_number " +
+            "    FROM meters m " +
+            "    JOIN customers c ON m.customer_id = c.id " +
+            "    WHERE m.id = NEW.meter_id; " +
+            "    " +
+            "    IF TG_OP = 'INSERT' THEN " +
+            "        v_message := format('Dear %s,\\nYour %s utility bill of %s FRW has been successfully processed.', " +
+            "                            v_customer_name, NEW.billing_period, NEW.total_amount); " +
+            "        INSERT INTO notifications (customer_name, email, phone_number, message, sent_at, trigger_event, bill_id) " +
+            "        VALUES (v_customer_name, v_email, v_phone_number, v_message, NOW(), 'BILL_GENERATED', NEW.id); " +
+            "    ELSIF TG_OP = 'UPDATE' AND NEW.status = 'PAID' THEN " +
+            "        SELECT COUNT(*) INTO v_notif_count FROM notifications WHERE trigger_event = 'BILL_PAID' AND bill_id = NEW.id; " +
+            "        IF v_notif_count = 0 THEN " +
+            "            v_message := format('Dear %s,\\nYour payment for the %s utility bill of %s FRW has been successfully processed. Current Balance: 0.0 FRW.', " +
+            "                                v_customer_name, NEW.billing_period, NEW.total_amount); " +
+            "            INSERT INTO notifications (customer_name, email, phone_number, message, sent_at, trigger_event, bill_id) " +
+            "            VALUES (v_customer_name, v_email, v_phone_number, v_message, NOW(), 'BILL_PAID', NEW.id); " +
+            "        END IF; " +
+            "    END IF; " +
+            "    RETURN NEW; " +
+            "END; " +
+            "$$ LANGUAGE plpgsql;";
 
-        // newRow[0] is always the primary key (id) in H2
-        Long billId = ((Number) newRow[0]).longValue();
-        boolean isInsert = (oldRow == null);
-
-        // Query full bill + customer info from the DB (always reliable)
-        String selectSql =
-                "SELECT b.billing_period, b.total_amount, b.status, " +
-                "c.full_names, c.email, c.phone_number " +
-                "FROM bills b " +
-                "JOIN meters m ON b.meter_id = m.id " +
-                "JOIN customers c ON m.customer_id = c.id " +
-                "WHERE b.id = ?";
-
-        String billingPeriod = "", status = "", customerName = "", email = "", phoneNumber = "";
-        double totalAmount = 0.0;
-
-        try (PreparedStatement ps = conn.prepareStatement(selectSql)) {
-            ps.setLong(1, billId);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return; // row not yet visible (shouldn't happen AFTER trigger)
-                billingPeriod = rs.getString("billing_period");
-                totalAmount   = rs.getDouble("total_amount");
-                status        = rs.getString("status");
-                customerName  = rs.getString("full_names");
-                email         = rs.getString("email");
-                phoneNumber   = rs.getString("phone_number");
-            }
-        }
-
-        if (isInsert) {
-            // Bill generation notification
-            String message = String.format(
-                    "Dear %s,\nYour %s utility bill of %.1f FRW has been successfully processed.",
-                    customerName, billingPeriod, totalAmount);
-            insertNotification(conn, customerName, email, phoneNumber, message, "BILL_GENERATED", billId);
-
-        } else if ("PAID".equals(status)) {
-            // Only insert a BILL_PAID notification once per bill
-            if (!billPaidNotificationExists(conn, billId)) {
-                String message = String.format(
-                        "Dear %s,\nYour payment for the %s utility bill of %.1f FRW has been successfully processed. Current Balance: 0.0 FRW.",
-                        customerName, billingPeriod, totalAmount);
-                insertNotification(conn, customerName, email, phoneNumber, message, "BILL_PAID", billId);
-            }
-        }
-    }
-
-    private boolean billPaidNotificationExists(Connection conn, Long billId) throws SQLException {
-        String sql = "SELECT COUNT(*) FROM notifications WHERE trigger_event = 'BILL_PAID' AND bill_id = ?";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, billId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() && rs.getInt(1) > 0;
-            }
-        }
-    }
-
-    private void insertNotification(Connection conn, String customerName, String email,
-                                    String phoneNumber, String message,
-                                    String event, Long billId) throws SQLException {
-        String sql = "INSERT INTO notifications " +
-                "(customer_name, email, phone_number, message, sent_at, trigger_event, bill_id) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?)";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, customerName);
-            ps.setString(2, email);
-            ps.setString(3, phoneNumber);
-            ps.setString(4, message);
-            ps.setTimestamp(5, Timestamp.valueOf(LocalDateTime.now()));
-            ps.setString(6, event);
-            ps.setLong(7, billId);
-            ps.executeUpdate();
-        }
-    }
-
-    @Override
-    public void close() throws SQLException {
-        // No-op
-    }
-
-    @Override
-    public void remove() throws SQLException {
-        // No-op
+        String createTriggerSql = 
+            "DROP TRIGGER IF EXISTS bill_trigger ON bills; " +
+            "CREATE TRIGGER bill_trigger " +
+            "AFTER INSERT OR UPDATE ON bills " +
+            "FOR EACH ROW " +
+            "EXECUTE FUNCTION bill_trigger_function();";
+            
+        jdbcTemplate.execute(createFunctionSql);
+        jdbcTemplate.execute(createTriggerSql);
+        System.out.println("PostgreSQL Database Trigger successfully registered on table 'bills'");
     }
 }
